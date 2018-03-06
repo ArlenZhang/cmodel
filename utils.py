@@ -1,15 +1,16 @@
 import os
 import gzip
 import shutil
-import struct
 import urllib
-from matplotlib import pyplot as plt
+import jieba.posseg
+import pickle as pkl
 import numpy as np
 import tensorflow as tf
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 
+# loss优化
 def huber_loss(labels, predictions, delta=14.0):
     residual = tf.abs(labels - predictions)
 
@@ -20,40 +21,166 @@ def huber_loss(labels, predictions, delta=14.0):
     return tf.cond(residual < delta, f1, f2)
 
 
-def safe_mkdir(path):
-    """ Create a directory if there isn't one already. """
-    try:
-        os.mkdir(path)
-    except OSError:
-        pass
+# 返回sentence形式， label形式，考虑直接数据准备过程中进行padding操作
+def parse_data(d_type, config):
+    if d_type == "train":
+        count = config.count_train
+        with open(config.filename_train, "rb") as f:
+            data = pkl.load(f)
+    else:
+        count = config.count_test
+        with open(config.filename_test, "rb") as f:
+            data = pkl.load(f)
+    # 最后得到的向量形式的训练数据和测试数据
+    arg1_word_ids = []
+    arg1_pos_ids = []
+    arg2_word_ids = []
+    arg2_pos_ids = []
+    labels = []
+    # 对每一行记录进行解析
+    for idx in range(len(data)):
+        temp_batch1 = []
+        temp_pos1 = []
+        temp_batch2 = []
+        temp_pos2 = []
+
+        # 对论元进行分割 取词 padding操作
+        word_list_arg1, tag_list1 = do_cut(data[idx][1])
+        word_list_arg2, tag_list2 = do_cut(data[idx][2])
+
+        # 当前训练语料中的论元组, 不考虑太长的句子
+        if len(list(word_list_arg1)) > config.arg1_length or len(list(word_list_arg2)) > config.arg2_length:
+            count -= 1
+            continue
+
+        temp_index = 0
+        # 对第一论元进行分割 取词 padding操作
+        for index in range(len(word_list_arg1)):
+            temp_index += 1
+            item = word_list_arg1[index]
+            item_pos = tag_list1[index]
+            if item in config.vocab_words.keys() and item_pos in config.vocab_pos.keys():
+                temp_batch1.append(config.vocab_words[item])
+                temp_pos1.append(config.vocab_pos[item_pos])
+            else:
+                input("怎么还是存在未知词汇1！")
+        # padding
+        while temp_index < config.arg1_length:
+            temp_index += 1
+            temp_batch1.append(0)
+            temp_pos1.append(0)
+
+        # 对第二论元进行分割 取词 padding操作
+        temp_index = 0
+        for index in range(len(word_list_arg2)):
+            temp_index += 1
+            item = word_list_arg2[index]
+            item_pos = tag_list2[index]
+            if item in config.vocab_words.keys():
+                temp_batch2.append(config.vocab_words[item])
+                temp_pos2.append(config.vocab_pos[item_pos])
+            else:
+                input("怎么还是存在未知词汇2！")
+        # padding
+        while temp_index < config.arg2_length:
+            temp_index += 1
+            temp_batch2.append(0)
+            temp_pos2.append(0)
+
+        # 生成元组
+        arg1_word_ids.append(temp_batch1)
+        arg2_word_ids.append(temp_batch2)
+        arg1_pos_ids.append(temp_pos1)
+        arg2_pos_ids.append(temp_pos2)
+
+        # 每一句代表两个 论元 分配一个论元关系标签即可
+        if config.processing_tag is not None:
+            labels.append(config.processing_tag(data[idx][3]))
+
+    # 写回config 中的 count
+    if d_type == "train":
+        config.count_train = count
+    else:
+        config.count_test = count
+    return np.array(arg1_word_ids), np.array(arg2_word_ids), np.array(labels), np.array(arg1_pos_ids), np.array(
+        arg2_pos_ids)
 
 
-def read_birth_life_data(filename):
-    """
-    Read in birth_life_2010.txt and return:
-    data in the form of NumPy array
-    n_samples: number of samples
-    """
-    text = open(filename, 'r').readlines()[1:]
-    data = [line[:-1].split('\t') for line in text]
-    births = [float(line[1]) for line in data]
-    lifes = [float(line[2]) for line in data]
-    data = list(zip(births, lifes))
-    n_samples = len(data)
-    data = np.asarray(data, dtype=np.float32)
-    return data, n_samples
+# 返回words和tags
+def do_cut(seq):
+    words = []
+    pos = []
+    result = jieba.posseg.cut(seq)
+    for word, p in result:
+        words.append(word)
+        pos.append(p)
+    return words, pos
 
 
+'''
+    读取所有数据，训练集，验证集，测试集(930个句子，取随机的一半作为验证集) 
+'''
+
+
+def read_data(config, validation_of_test=0.5):
+    # 训练集
+    train_arg1, train_arg2, train_labels, train_pos1, train_pos2 = parse_data('train', config)
+    # 测试集和验证集
+    test_v_arg1, test_v_arg2, test_v_labels, test_v_pos1, test_v_pos2 = parse_data('test', config)
+    val_num = int(config.count_test * validation_of_test)
+    test_num = config.count_test - val_num
+    indices = np.random.permutation(config.count_test)  # test文件中数据总数
+    test_idx, val_idx = indices[:test_num], indices[test_num:]
+
+    test_arg1, test_arg2 = test_v_arg1[test_idx, :], test_v_arg2[test_idx, :]
+    test_labels = test_v_labels[test_idx]
+    test_pos1, test_pos2 = test_v_pos1[test_idx, :], test_v_pos2[test_idx, :]
+
+    val_arg1, val_arg2, val_pos1, val_pos2 = \
+        test_v_arg1[val_idx, :], test_v_arg2[val_idx, :], test_v_pos1[val_idx, :], \
+        test_v_pos2[val_idx, :]
+    val_labels = test_v_labels[val_idx]
+
+    return (train_arg1, train_arg2, train_labels, train_pos1, train_pos2), \
+           (val_arg1, val_arg2, val_labels, val_pos1, val_pos2), \
+           (test_arg1, test_arg2, test_labels, test_pos1, test_pos2)
+
+
+# 从本地准备好的数据中获取训练和测试数据
+def get_dataset(config):
+    train, val, test = read_data(config, validation_of_test=0.5)
+    # 将train中数据提取成(data1, data2, ..)的元组进行封装
+    train_d_l = (train[0], train[1], train[2])
+    # train.shape: (1900, 50, sent_len)  # label.shape : (1900, 12)
+    # Create datasets and iterator
+    train_data = tf.data.Dataset.from_tensor_slices(train_d_l)
+    train_data = train_data.shuffle(config.n_test)  # if you want to shuffle your data
+    train_data = train_data.batch(config.batch_size)
+
+    # 将验证集转成一样的元组
+    v_d_l = (val[0], val[1], val[2])
+    val_data = tf.data.Dataset.from_tensor_slices(v_d_l)
+    val_data = val_data.batch(config.batch_size)
+
+    # 将test数据转成一样的元组
+    test_d_l = (test[0], test[1], test[2])
+    test_data = tf.data.Dataset.from_tensor_slices(test_d_l)
+    test_data = test_data.batch(config.batch_size)
+
+    return train_data, val_data, test_data
+
+
+# 根据url下载指定文件到本地
 def download_one_file(download_url,
                       local_dest,
                       expected_byte=None,
                       unzip_and_remove=False):
     """ 
-    Download the file from download_url into local_dest
-    if the file doesn't already exists.
-    If expected_byte is provided, check if 
-    the downloaded file has the same number of bytes.
-    If unzip_and_remove is True, unzip the file and remove the zip file
+        Download the file from download_url into local_dest
+        if the file doesn't already exists.
+        If expected_byte is provided, check if
+        the downloaded file has the same number of bytes.
+        If unzip_and_remove is True, unzip the file and remove the zip file
     """
     if os.path.exists(local_dest) or os.path.exists(local_dest[:-3]):
         print('%s already exists' % local_dest)
@@ -70,85 +197,3 @@ def download_one_file(download_url,
                     os.remove(local_dest)
             else:
                 print('The downloaded file has unexpected number of bytes')
-
-
-def download_mnist(path):
-    """ 
-    Download and unzip the dataset mnist if it's not already downloaded 
-    Download from http://yann.lecun.com/exdb/mnist
-    """
-    if exit(os.path.join(path, 'train-images.idx3-ubyte')):
-        print("文件下载过！")
-        return
-    safe_mkdir(path)
-    url = 'http://yann.lecun.com/exdb/mnist'
-    filenames = ['train-images.idx3-ubyte.gz',
-                 'train-labels.idx1-ubyte.gz',
-                 't10k-images.idx3-ubyte.gz',
-                 't10k-labels.idx1-ubyte.gz']
-    expected_bytes = [9912422, 28881, 1648877, 4542]
-
-    for filename, byte in zip(filenames, expected_bytes):
-        download_url = os.path.join(url, filename)
-        local_dest = os.path.join(path, filename)
-        download_one_file(download_url, local_dest, byte, True)
-
-
-def parse_data(path, dataset, flatten):
-    if dataset != 'train' and dataset != 't10k':
-        raise NameError('dataset must be train or t10k')
-
-    label_file = os.path.join(path, dataset + '-labels.idx1-ubyte')
-    with open(label_file, 'rb') as file:
-        _, num = struct.unpack(">II", file.read(8))
-        labels = np.fromfile(file, dtype=np.int8)  # int8
-        new_labels = np.zeros((num, 10))
-        new_labels[np.arange(num), labels] = 1
-
-    img_file = os.path.join(path, dataset + '-images.idx3-ubyte')
-    with open(img_file, 'rb') as file:
-        _, num, rows, cols = struct.unpack(">IIII", file.read(16))
-        imgs = np.fromfile(file, dtype=np.uint8).reshape(num, rows, cols)  # uint8
-        imgs = imgs.astype(np.float32) / 255.0
-        if flatten:
-            imgs = imgs.reshape([num, -1])
-
-    return imgs, new_labels
-
-
-def read_mnist(path, flatten=True, num_train=55000):
-    """
-        Read in the mnist dataset, given that the data is stored in path
-        Return two tuples of numpy arrays
-        ((train_imgs, train_labels), (test_imgs, test_labels))
-    """
-    imgs, labels = parse_data(path, 'train', flatten)
-    indices = np.random.permutation(labels.shape[0])
-    train_idx, val_idx = indices[:num_train], indices[num_train:]
-    train_img, train_labels = imgs[train_idx, :], labels[train_idx, :]
-    val_img, val_labels = imgs[val_idx, :], labels[val_idx, :]
-    test = parse_data(path, 't10k', flatten)
-    return (train_img, train_labels), (val_img, val_labels), test
-
-
-def get_mnist_dataset(batch_size, mnist_folder):
-    # download_mnist(mnist_folder)
-    train, val, test = read_mnist(mnist_folder, flatten=False)
-
-    # Step 2: Create datasets and iterator
-    train_data = tf.data.Dataset.from_tensor_slices(train)
-    train_data = train_data.shuffle(10000)  # if you want to shuffle your data
-    train_data = train_data.batch(batch_size)
-
-    test_data = tf.data.Dataset.from_tensor_slices(test)
-    test_data = test_data.batch(batch_size)
-
-    return train_data, test_data
-
-
-def show(image):
-    """
-    Render a given numpy.uint8 2D array of pixel data.
-    """
-    plt.imshow(image, cmap='gray')
-    plt.show()

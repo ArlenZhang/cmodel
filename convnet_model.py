@@ -6,6 +6,7 @@
 import time
 from cmodel.utils import *
 from cmodel.c_config import c_config
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 '''
@@ -20,6 +21,8 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
     操作: 宽卷积 + 规范化
     既然每个单词的词向量维度一致，那就不要padding了
 '''
+
+
 def conv_relu(inputs, filters, k_rows, k_cols, stride, padding, scope_name):
     with tf.variable_scope(scope_name, reuse=tf.AUTO_REUSE) as scope:
         # 输入数据是左边或者右边的1个argument组成的矩阵，channel在这里仍然是1,因为一个位置只有一个数字表示
@@ -93,48 +96,97 @@ def fully_connected(inputs, out_dim, scope_name='fc'):
 class ConvNet(object):
     def __init__(self):
         self.accuracy = self.summary_op = self.opt = self.loss = self.logits = self.test_init = self.train_init = \
-            self.img = self.label = None
-        self.config = c_config()  # 创建配置对象
+            self.data_next = self.label = None
+        self.config = c_config(True)  # 创建配置对象
+        self.arg1_word_ids = self.arg2_word_ids = None
+        self.arg1_word_embeddings = self.arg2_word_embeddings = None
+        self.training = True
+        self.skip_step = 20
 
+    # 获取数据运用iterator机制，注意当前把padding之后的句子当作图像进行操作即可
     def get_data(self):
         with tf.name_scope('data'):
-            mnist_folder = '../../data/mnist'
-            train_data, test_data = get_mnist_dataset(self.batch_size, mnist_folder=mnist_folder)
+            # 获取能自动迭代的训练集，验证集，测试集
+            train_data, val_data, test_data = get_dataset(self.config)
             iterator = tf.data.Iterator.from_structure(train_data.output_types, train_data.output_shapes)
-            img, self.label = iterator.get_next()
-            self.img = tf.reshape(img, shape=[-1, 28, 28, 1])
-            # reshape the image to make it work with tf.nn.conv2d
+            self.arg1_word_ids, self.arg2_word_ids, self.label = iterator.get_next()
+            # 在训练过程中将不断更新数据
             self.train_init = iterator.make_initializer(train_data)  # initializer for train_data
             self.test_init = iterator.make_initializer(test_data)  # initializer for test_data
+
+    # word_embedding层
+    def add_word_embeddings_op(self):
+        with tf.variable_scope("words"):
+            # 创建Wiki词向量
+            _word_embeddings = tf.Variable(
+                self.config.embeddings,
+                name="_word_embeddings",
+                dtype=tf.float32,
+                trainable=self.config.train_embeddings
+            )
+
+            # 将当前批次中所有词汇 word_ids 的对应词向量封装在word_embeddings中
+            self.arg1_word_embeddings = tf.nn.embedding_lookup(_word_embeddings, self.arg1_word_ids,
+                                                               name="arg1_word_embeddings")
+            self.arg2_word_embeddings = tf.nn.embedding_lookup(_word_embeddings, self.arg2_word_ids,
+                                                               name="arg2_word_embeddings")
+            # 第一个embedding的shape是 (?, 37, 50)相当于图片，先要变换成(?, 50, 37)便于convolution
+
+            # 对文本呢矩阵reshape到[-1, word_d(?, 当前还是word_id，维度还不是50), sentence_len(词个数), 1]
+            # reshape the image to make it work with tf.nn.conv2d
+            # self.arg1_word_ids = tf.reshape(arg1_word_ids, shape=[-1, 1, self.config.arg1_length, 1])
+            # self.arg2_word_ids = tf.reshape(arg2_word_ids, shape=[-1, 1, self.config.arg2_length, 1])
 
     def create_logits(self):
         """
             数据流 or 模型逻辑结构
         """
         # 建立两层convolution + max_pooling
-        conv1 = conv_relu(inputs=self.img,
-                          filters=32,
-                          k_size=5,  # 感受野为5*5
-                          stride=1,  # 步长
-                          padding='SAME',  # 补
-                          scope_name='conv1')
-        pool1 = maxpool(inputs=conv1,
-                        ksize=2,
-                        stride=2,
-                        padding='VALID',
-                        scope_name='pool1')
-        conv2 = conv_relu(inputs=pool1,
-                          filters=64,
-                          k_size=5,
-                          stride=1,
-                          padding='SAME',
-                          scope_name='conv2')
-        pool2 = maxpool(conv2, 2, 2, 'VALID', 'pool2')
-        feature_dim = pool2.shape[1] * pool2.shape[2] * pool2.shape[3]
-        pool2 = tf.reshape(pool2, [-1, feature_dim])  # 转成feature_dim列的数据
-        full_c = fully_connected(pool2, 1024, 'fc')
-        dropout = tf.nn.dropout(tf.nn.relu(full_c), self.keep_prob, name='relu_dropout')
-        self.logits = fully_connected(dropout, self.n_classes, 'logits')
+        # 论元1
+        conv_arg1 = conv_relu(inputs=self.arg1_word_embeddings,
+                              filters=32,
+                              k_rows=self.config.filter_row,  # 感受野为k_row * k_col
+                              k_cols=self.config.filter_col,
+                              stride=1,  # 步长
+                              padding='SAME',  # 补
+                              scope_name='arg1_conv')
+        # 得到的将会是一列数据,按照批次进变换使得行数对应batch_size
+        arg1_pool = maxpool(inputs=conv_arg1,
+                            k_rows=self.config.pooling_row,
+                            k_cols=self.config.arg1_pooling_col,
+                            stride=1,
+                            padding='VALID',  # means no padding
+                            scope_name='arg1_pool')
+        arg1_pool = tf.reshape(arg1_pool, [-1, self.config.dim_word])
+
+        # 论元2
+        conv_arg2 = conv_relu(inputs=self.arg2_word_embeddings,
+                              filters=32,
+                              k_rows=self.config.filter_row,  # 感受野为k_row * k_col
+                              k_cols=self.config.filter_col,
+                              stride=1,  # 步长
+                              padding='SAME',  # 补
+                              scope_name='arg2_conv')
+        # 得到的将会是一列数据,按照批次进变换使得行数对应batch_size
+        arg2_pool = maxpool(inputs=conv_arg2,
+                            k_rows=self.config.pooling_row,
+                            k_cols=self.config.arg2_pooling_col,
+                            stride=1,
+                            padding='VALID',  # means no padding
+                            scope_name='arg2_pool')
+        arg2_pool = tf.reshape(arg2_pool, [-1, self.config.dim_word])
+
+        # 对输出值进行拼接
+        concat_result = tf.concat((arg1_pool, arg2_pool), axis=1)  # axis=1代表两个矩阵水平方向拼接
+
+        # 全连接
+        full_c = fully_connected(concat_result, self.config.hidden_size, 'fc')
+
+        # 避免过拟合处理方案
+        dropout = tf.nn.dropout(tf.nn.relu(full_c), self.config.keep_prob, name='relu_dropout')
+
+        # 建立logits
+        self.logits = fully_connected(dropout, self.config.ntags, 'logits')
 
     def create_loss(self):
         """
@@ -148,7 +200,7 @@ class ConvNet(object):
         """
             反响传播，训练最优参数
         """
-        self.opt = tf.train.AdamOptimizer(self.lr).minimize(self.loss, global_step=self.gstep)
+        self.opt = tf.train.AdamOptimizer(self.config.lr).minimize(self.loss, global_step=self.config.gstep)
 
     def summary(self):
         """
@@ -162,7 +214,7 @@ class ConvNet(object):
 
     def eval(self):
         """
-            Count the number of right predictions in a batch
+            对一批数据的评估
         """
         with tf.name_scope('predict'):
             preds = tf.nn.softmax(self.logits)
@@ -174,6 +226,7 @@ class ConvNet(object):
             Build the computation graph
         """
         self.get_data()
+        self.add_word_embeddings_op()
         self.create_logits()
         self.create_loss()
         self.create_optimize()
@@ -181,6 +234,16 @@ class ConvNet(object):
         self.summary()
 
     def train_one_epoch(self, sess, saver, init, writer, epoch, step):
+        """
+            一次完整的训练过程
+        :param sess:
+        :param saver:
+        :param init:
+        :param writer:
+        :param epoch:
+        :param step:
+        :return:
+        """
         start_time = time.time()
         sess.run(init)
         self.training = True
@@ -215,31 +278,28 @@ class ConvNet(object):
         except tf.errors.OutOfRangeError:
             pass
 
-        print('Accuracy at epoch {0}: {1} '.format(epoch, total_correct_preds / self.n_test))
+        print('Accuracy at epoch {0}: {1} '.format(epoch, total_correct_preds / self.config.n_test))
         print('Took: {0} seconds'.format(time.time() - start_time))
 
     def train(self, n_epochs):
         """
             The train function alternates between training one epoch and evaluating
         """
-        safe_mkdir('../../checkpoints')
-        safe_mkdir('../../checkpoints/Demo15')
-        writer = tf.summary.FileWriter('../../graphs/Demo15', tf.get_default_graph())
+        writer = tf.summary.FileWriter('../../graphs', tf.get_default_graph())
 
         with tf.Session() as sess:
             sess.run(tf.global_variables_initializer())
             saver = tf.train.Saver()
-            ckpt = tf.train.get_checkpoint_state(os.path.dirname('../../checkpoints/Demo15/checkpoint'))
+            ckpt = tf.train.get_checkpoint_state(os.path.dirname('../../checkpoints/checkpoint'))
             if ckpt and ckpt.model_checkpoint_path:
                 saver.restore(sess, ckpt.model_checkpoint_path)
 
-            step = self.gstep.eval()
+            step = self.config.gstep.eval()
 
             for epoch in range(n_epochs):
                 step = self.train_one_epoch(sess, saver, self.train_init, writer, epoch, step)
                 self.eval_once(sess, self.test_init, writer, epoch, step)
         writer.close()
-
 
 if __name__ == '__main__':
     model = ConvNet()

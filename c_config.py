@@ -15,36 +15,37 @@ class c_config:
         self.lr_method = "adam"
         self.lr_decay = 0.9
         self.batch_size = 10  # 每次处理10句
-        # self.hidden1_size = 50
-        # self.hidden2_size = 50
+        self.hidden_size = 120
+
         self.keep_prob = tf.constant(0.75)
         self.gstep = tf.Variable(0, dtype=tf.int32, trainable=False, name='global_step')
         self.ntags = 12  # 也就是12种粗粒度关系种类
-        self.skip_step = 20
+        self.n_test = 10000  # 有待商榷
         self.nepochs = 15
-        self.training = True
         self.dropout = float(0.5)
         self.clip = -1  # if negative, no clipping
         self.nepoch_no_imprv = 3
 
         # 词向量库信息配置
-        self.filename_wiki = "data/word2vec/CH.GigawordWiki.50.bin"
-        self.filename_trimmed = "data/wiki.npz".format(self.dim_word)
+        self.filename_wiki = "../data/word2vec/CH.GigawordWiki.50.bin"
         self.dim_word = 50  # embeddings层单词的向量维度,根据词向量库的向量维度确定
+        self.filename_trimmed = "../data/wiki.npz".format(self.dim_word)
         self.use_pretrained = True  # 使用预训练词向量
         self.train_embeddings = False
 
-        # 论元长度配置，瓷都已经在准备数据的时候计算出来，直接从pkl文件读取即可
-        with open("data/configuration.pkl", "rb") as f:
+        # 论元长度，训练数据统计配置，瓷都已经在准备数据的时候计算出来，直接从pkl文件读取即可
+        with open("../data/configuration.pkl", "rb") as f:
             config = pkl.load(f)
             self.arg1_length = int(config["len_r_ave"])
             self.arg2_length = int(config["len_l_ave"])
             self.sentence_length = self.arg1_length + self.arg2_length
+            self.count_train = int(config["count_train"])
+            self.count_test = int(config["count_test"])
 
         # 训练与测试数据信息配置
         # 路径
-        self.filename_dev = self.filename_test = "data/test_data.pkl"
-        self.filename_train = "data/train_data.pkl"
+        self.filename_dev = self.filename_test = "../data/test_data.pkl"
+        self.filename_train = "../data/train_data.pkl"
         self.max_iter = None
 
         # 数据本身
@@ -53,9 +54,9 @@ class c_config:
         self.embeddings = None
 
         # 词汇, 标签, 包含词性
-        self.filename_words = "data/words.txt"
-        self.filename_tags = "data/tags.txt"
-        self.filename_pos = "data/pos.txt"
+        self.filename_words = "../data/words.txt"
+        self.filename_tags = "../data/tags.txt"
+        self.filename_pos = "../data/pos.txt"
 
         # 模型参数和日志数据信息配置
         self.dir_output = "../data/c_model/"  # 模型参数存储位置
@@ -70,6 +71,13 @@ class c_config:
         # 不使用字符，以词为单位
         self.use_chars = False
         self.use_crf = False
+
+        # CNN 特别参数配置
+        self.filter_row = 2
+        self.filter_col = 1
+        self.pooling_row = 1
+        self.arg1_pooling_col = self.arg1_length  # self.pooling_col 的值分arg1和arg2不同
+        self.arg2_pooling_col = self.arg2_length
 
         # 训练的时候要加载数据，设置阶段不需要加载
         if load:

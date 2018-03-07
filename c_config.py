@@ -14,8 +14,8 @@ class c_config:
         self.lr = 0.001
         self.lr_method = "adam"
         self.lr_decay = 0.9
-        self.batch_size = 10  # 每次处理10句
-        self.hidden_size = 120
+        self.batch_size = 10  # 10句
+        self.hidden_size = 1024  # 全连接层只用一层，隐层输出就是对应到类别之间的比重
 
         self.keep_prob = tf.constant(0.75)
         self.gstep = tf.Variable(0, dtype=tf.int32, trainable=False, name='global_step')
@@ -78,6 +78,10 @@ class c_config:
         self.pooling_row = 1
         self.arg1_pooling_col = self.arg1_length  # self.pooling_col 的值分arg1和arg2不同
         self.arg2_pooling_col = self.arg2_length
+
+        # 代码运行判断中，对数据的使用进行标记，因为不分太长的数据被抛弃
+        self.train_idx_in_file = []
+        self.test_idx_in_file = []
 
         # 训练的时候要加载数据，设置阶段不需要加载
         if load:

@@ -76,14 +76,14 @@ def maxpool(inputs, k_rows, k_cols, stride, padding='VALID', scope_name='pool'):
 """
 
 
-def fully_connected(inputs, out_dim, scope_name='fc'):
+def fully_connected(inputs, hidden_size, scope_name='fc'):
     """
         A fully connected linear layer on inputs
     """
     with tf.variable_scope(scope_name, reuse=tf.AUTO_REUSE) as scope:
         in_dim = inputs.shape[-1]  # 列数作为pooling层输出数据个数 ?
-        w = tf.get_variable('weights', [in_dim, out_dim], initializer=tf.truncated_normal_initializer())
-        b = tf.get_variable('biases', [out_dim], initializer=tf.constant_initializer(0.0))
+        w = tf.get_variable('weights', [in_dim, hidden_size], initializer=tf.truncated_normal_initializer())
+        b = tf.get_variable('biases', [hidden_size], initializer=tf.constant_initializer(0.0))
         out = tf.matmul(inputs, w) + b
     return out
 
@@ -91,14 +91,13 @@ def fully_connected(inputs, out_dim, scope_name='fc'):
 """
     ================ 神经网络部分 ==================
 """
-
-
 class ConvNet(object):
     def __init__(self):
         self.accuracy = self.summary_op = self.opt = self.loss = self.logits = self.test_init = self.train_init = \
             self.data_next = self.label = None
         self.config = c_config(True)  # 创建配置对象
-        self.arg1_word_ids = self.arg2_word_ids = None
+        self.arg1_word_ids = None
+        self.arg2_word_ids = None
         self.arg1_word_embeddings = self.arg2_word_embeddings = None
         self.training = True
         self.skip_step = 20
@@ -107,12 +106,13 @@ class ConvNet(object):
     def get_data(self):
         with tf.name_scope('data'):
             # 获取能自动迭代的训练集，验证集，测试集
-            train_data, val_data, test_data = get_dataset(self.config)
-            iterator = tf.data.Iterator.from_structure(train_data.output_types, train_data.output_shapes)
-            self.arg1_word_ids, self.arg2_word_ids, self.label = iterator.get_next()
+            train_data_, val_data, test_data = get_dataset(self.config)
+            iterator_ = tf.data.Iterator.from_structure(train_data_.output_types, train_data_.output_shapes)
+            self.arg1_word_ids, self.arg2_word_ids, self.label = iterator_.get_next()
+
             # 在训练过程中将不断更新数据
-            self.train_init = iterator.make_initializer(train_data)  # initializer for train_data
-            self.test_init = iterator.make_initializer(test_data)  # initializer for test_data
+            self.train_init = iterator_.make_initializer(train_data_)  # initializer for train_data
+            self.test_init = iterator_.make_initializer(test_data)  # initializer for test_data
 
     # word_embedding层
     def add_word_embeddings_op(self):
@@ -126,16 +126,16 @@ class ConvNet(object):
             )
 
             # 将当前批次中所有词汇 word_ids 的对应词向量封装在word_embeddings中
-            self.arg1_word_embeddings = tf.nn.embedding_lookup(_word_embeddings, self.arg1_word_ids,
-                                                               name="arg1_word_embeddings")
-            self.arg2_word_embeddings = tf.nn.embedding_lookup(_word_embeddings, self.arg2_word_ids,
-                                                               name="arg2_word_embeddings")
-            # 第一个embedding的shape是 (?, 37, 50)相当于图片，先要变换成(?, 50, 37)便于convolution
+            arg1_word_embeddings = tf.nn.embedding_lookup(_word_embeddings, self.arg1_word_ids,
+                                                          name="arg1_word_embeddings")
+            arg2_word_embeddings = tf.nn.embedding_lookup(_word_embeddings, self.arg2_word_ids,
+                                                          name="arg2_word_embeddings")
 
-            # 对文本呢矩阵reshape到[-1, word_d(?, 当前还是word_id，维度还不是50), sentence_len(词个数), 1]
-            # reshape the image to make it work with tf.nn.conv2d
-            # self.arg1_word_ids = tf.reshape(arg1_word_ids, shape=[-1, 1, self.config.arg1_length, 1])
-            # self.arg2_word_ids = tf.reshape(arg2_word_ids, shape=[-1, 1, self.config.arg2_length, 1])
+            # 第一个embedding的shape是 (?, 37, 50)相当于图片，下面变换成(?, 50, 37, 1)便于convolution
+            self.arg1_word_embeddings = tf.reshape(arg1_word_embeddings, shape=[-1, self.config.dim_word,
+                                                                                self.config.arg1_length, 1])
+            self.arg2_word_embeddings = tf.reshape(arg2_word_embeddings, shape=[-1, self.config.dim_word,
+                                                                                self.config.arg2_length, 1])
 
     def create_logits(self):
         """
@@ -157,7 +157,9 @@ class ConvNet(object):
                             stride=1,
                             padding='VALID',  # means no padding
                             scope_name='arg1_pool')
-        arg1_pool = tf.reshape(arg1_pool, [-1, self.config.dim_word])
+        # 上面得到的shape是(?, 50, 1, 64) 现在需要将pool的结果拼接成1维的数据
+        feature_dim = arg1_pool.shape[1] * arg1_pool.shape[2] * arg1_pool.shape[3]
+        arg1_pool = tf.reshape(arg1_pool, [-1, feature_dim])
 
         # 论元2
         conv_arg2 = conv_relu(inputs=self.arg2_word_embeddings,
@@ -174,17 +176,17 @@ class ConvNet(object):
                             stride=1,
                             padding='VALID',  # means no padding
                             scope_name='arg2_pool')
-        arg2_pool = tf.reshape(arg2_pool, [-1, self.config.dim_word])
-
-        # 对输出值进行拼接
+        feature_dim = arg2_pool.shape[1] * arg2_pool.shape[2] * arg2_pool.shape[3]  # 50*32 = 1600，隐藏层取2/3即可
+        arg2_pool = tf.reshape(arg2_pool, [-1, feature_dim])
+        # 对输出值进行拼接，
         concat_result = tf.concat((arg1_pool, arg2_pool), axis=1)  # axis=1代表两个矩阵水平方向拼接
 
         # 全连接
         full_c = fully_connected(concat_result, self.config.hidden_size, 'fc')
+        # 隐藏层由50个神经元对应输出数据(?, 50)，每个输入(?, 100)到隐藏层50节点之间建立联系然后再映射到12个输出节点
 
         # 避免过拟合处理方案
         dropout = tf.nn.dropout(tf.nn.relu(full_c), self.config.keep_prob, name='relu_dropout')
-
         # 建立logits
         self.logits = fully_connected(dropout, self.config.ntags, 'logits')
 
@@ -209,7 +211,7 @@ class ConvNet(object):
         with tf.name_scope('summaries'):
             tf.summary.scalar('loss', self.loss)
             tf.summary.scalar('accuracy', self.accuracy)
-            tf.summary.histogram('histogram loss', self.loss)
+            tf.summary.histogram('histogram_loss', self.loss)
             self.summary_op = tf.summary.merge_all()
 
     def eval(self):
@@ -233,10 +235,10 @@ class ConvNet(object):
         self.eval()
         self.summary()
 
-    def train_one_epoch(self, sess, saver, init, writer, epoch, step):
+    def train_one_epoch(self, sess_, saver, init, writer, epoch, step):
         """
             一次完整的训练过程
-        :param sess:
+        :param sess_:
         :param saver:
         :param init:
         :param writer:
@@ -245,13 +247,14 @@ class ConvNet(object):
         :return:
         """
         start_time = time.time()
-        sess.run(init)
+        sess_.run(init)  # 初始化数据，得到最初的迭代器
         self.training = True
         total_loss = 0
         n_batches = 0
         try:
             while True:
-                _, l, summaries = sess.run([self.opt, self.loss, self.summary_op])
+                # train opt是为了学习模型，不需要返回值。train loss是为了得到每次训练之后的loss值，统计数据。..
+                _, l, summaries = sess_.run([self.opt, self.loss, self.summary_op])
                 writer.add_summary(summaries, global_step=step)
                 if (step + 1) % self.skip_step == 0:
                     print('Loss at step {0}: {1}'.format(step, l))
@@ -260,19 +263,20 @@ class ConvNet(object):
                 n_batches += 1
         except tf.errors.OutOfRangeError:
             pass
-        saver.save(sess, '../../checkpoints/Demo15/mnist-convnet', step)
+        saver.save(sess_, '../checkpoints/sess_save', step)
         print('Average loss at epoch {0}: {1}'.format(epoch, total_loss / n_batches))
         print('Took: {0} seconds'.format(time.time() - start_time))
         return step
 
-    def eval_once(self, sess, init, writer, epoch, step):
+    def eval_once(self, sess_, init, writer, epoch, step):
         start_time = time.time()
-        sess.run(init)
+        # 初始化迭代器，回到数据首部
+        sess_.run(init)
         self.training = False
         total_correct_preds = 0
         try:
             while True:
-                accuracy_batch, summaries = sess.run([self.accuracy, self.summary_op])
+                accuracy_batch, summaries = sess_.run([self.accuracy, self.summary_op])
                 writer.add_summary(summaries, global_step=step)
                 total_correct_preds += accuracy_batch
         except tf.errors.OutOfRangeError:
@@ -285,26 +289,27 @@ class ConvNet(object):
         """
             The train function alternates between training one epoch and evaluating
         """
-        writer = tf.summary.FileWriter('../../graphs', tf.get_default_graph())
+        writer = tf.summary.FileWriter('../graphs', tf.get_default_graph())
 
-        with tf.Session() as sess:
-            sess.run(tf.global_variables_initializer())
+        with tf.Session() as sess_:
+            sess_.run(tf.global_variables_initializer())
             saver = tf.train.Saver()
-            ckpt = tf.train.get_checkpoint_state(os.path.dirname('../../checkpoints/checkpoint'))
+            ckpt = tf.train.get_checkpoint_state(os.path.dirname('../checkpoints/sess_save'))
             if ckpt and ckpt.model_checkpoint_path:
-                saver.restore(sess, ckpt.model_checkpoint_path)
+                saver.restore(sess_, ckpt.model_checkpoint_path)
 
             step = self.config.gstep.eval()
 
             for epoch in range(n_epochs):
-                step = self.train_one_epoch(sess, saver, self.train_init, writer, epoch, step)
-                self.eval_once(sess, self.test_init, writer, epoch, step)
+                step = self.train_one_epoch(sess_, saver, self.train_init, writer, epoch, step)
+                self.eval_once(sess_, self.test_init, writer, epoch, step)
         writer.close()
+
 
 if __name__ == '__main__':
     model = ConvNet()
     model.build()
-    model.train(n_epochs=10)
+    model.train(n_epochs=20)
     """
         tensorboard --logdir="graphs/Demo15"
         http://ArlenIAC:6006

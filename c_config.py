@@ -11,16 +11,15 @@ import pickle as pkl
 class c_config:
     def __init__(self, load=False):
         # 超参数等固定数据的配置
-        self.lr = 0.001
+        self.lr = 0.0003
         self.lr_method = "adam"
         self.lr_decay = 0.9
         self.batch_size = 10  # 10句
-        self.hidden_size = 1024  # 全连接层只用一层，隐层输出就是对应到类别之间的比重
+        self.hidden_size = 1200  # 全连接层只用一层，隐层输出就是对应到类别之间的比重 1/3
 
         self.keep_prob = tf.constant(0.75)
         self.gstep = tf.Variable(0, dtype=tf.int32, trainable=False, name='global_step')
         self.ntags = 12  # 也就是12种粗粒度关系种类
-        self.n_test = 10000  # 有待商榷
         self.nepochs = 15
         self.dropout = float(0.5)
         self.clip = -1  # if negative, no clipping
@@ -36,17 +35,19 @@ class c_config:
         # 论元长度，训练数据统计配置，瓷都已经在准备数据的时候计算出来，直接从pkl文件读取即可
         with open("../data/configuration.pkl", "rb") as f:
             config = pkl.load(f)
-            self.arg1_length = int(config["len_r_ave"])
-            self.arg2_length = int(config["len_l_ave"])
+            self.arg1_length = int(config["len_l_ave"])
+            self.arg2_length = int(config["len_r_ave"])
             self.sentence_length = self.arg1_length + self.arg2_length
             self.count_train = int(config["count_train"])
             self.count_test = int(config["count_test"])
+            self.count_eval = 0  # 后期被修改
 
         # 训练与测试数据信息配置
         # 路径
         self.filename_dev = self.filename_test = "../data/test_data.pkl"
         self.filename_train = "../data/train_data.pkl"
         self.max_iter = None
+        self.filename_data_set = "../data/dataset.pkl"
 
         # 数据本身
         self.vocab_words = self.vocab_tags = self.vocab_pos = None
@@ -73,11 +74,11 @@ class c_config:
         self.use_crf = False
 
         # CNN 特别参数配置
-        self.filter_row = 2
-        self.filter_col = 1
-        self.pooling_row = 1
-        self.arg1_pooling_col = self.arg1_length  # self.pooling_col 的值分arg1和arg2不同
-        self.arg2_pooling_col = self.arg2_length
+        self.filter_row = 1
+        self.filter_col = 2
+        self.pooling_col = 1
+        self.arg1_pooling_row = self.arg1_length  # self.pooling_col 的值分arg1和arg2不同
+        self.arg2_pooling_row = self.arg2_length
 
         # 代码运行判断中，对数据的使用进行标记，因为不分太长的数据被抛弃
         self.train_idx_in_file = []
@@ -101,3 +102,7 @@ class c_config:
 
         # 3. 获取预训练的embedding
         self.embeddings = (get_trimmed_glove_vectors(self.filename_trimmed) if self.use_pretrained else None)
+
+if __name__ == "__main__":
+    config_t = c_config(True)
+    print(config_t.vocab_pos["v"])

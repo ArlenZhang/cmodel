@@ -195,8 +195,8 @@ class ConvNet(object):
         feature_dim = arg2_pool.shape[1] * arg2_pool.shape[2]
         arg2_pool = tf.reshape(arg2_pool, [-1, feature_dim])
 
-        # 对输出值进行拼接，
-        concat_result = tf.concat((arg1_pool, arg2_pool), axis=1)  # axis=1代表两个矩阵水平方向拼接
+        # 对输出值进行拼接，axis=1代表两个矩阵水平方向拼接
+        concat_result = tf.concat((arg1_pool, self.arg1_pos_ids, arg2_pool, self.arg2_pos_ids), axis=1)
         # 全连接
         full_c = fully_connected(concat_result, self.config.hidden_size, 'fc')
         # 隐藏层由50个神经元对应输出数据(?, 50)，每个输入(?, 100)到隐藏层50节点之间建立联系然后再映射到12个输出节点
@@ -335,8 +335,8 @@ def do_draw(n_epochs, y):
 if __name__ == '__main__':
     model = ConvNet()
     model.build()
-    accs = model.train(n_epochs=10)
-    do_draw(n_epochs=10, y=accs)
+    accs = model.train(n_epochs=20)
+    do_draw(n_epochs=20, y=accs)
     """
         tensorboard --logdir="graphs/Demo15"
         http://ArlenIAC:6006
